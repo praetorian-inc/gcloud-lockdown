@@ -1,0 +1,6 @@
+binaryauthorization.googleapis.com
+containerregistry.googleapis.com
+containeranalysis.googleapis.com
+cloudidentity.googleapis.com
+oslogin.googleapis.com
+vpcaccess.googleapis.com
