@@ -23,6 +23,10 @@ You must have a GCP Organization. Free accounts come with Projects only.
 If you do not have one, create one according to [Creating and Managing Organizations](https://cloud.google.com/resource-manager/docs/creating-managing-organization).
 We recommend the `G-Suite` path as it worked more smoothly than the `Cloud Identity`.
 
+Beware that many services are currently incompatible with VPC Service Controls!
+If your project uses these [listed services](https://cloud.google.com/vpc-service-controls/docs/supported-products) you
+are in luck. Otherwise you may need to check back later, use separate projects for unsupported services or create access-levels.
+
 ## Tests
 Let's start with what we are trying to prove. Our scripts support a multi-tenant scenario where a tenant can write to buckets in their own project and
 a specific bucket in a project shared amongst all tenants.
@@ -70,14 +74,19 @@ source .env
 ## A more complete multi-tenant script.
 The script `create_service_control_project.sh` demonstrates the VPC Service Controls for educational purposes.
 A more complete version with some basic security services like configured Logging and Alerts for the malicious activity
-is available in `create_service_control_project_full.sh`.
+is available in `create_service_control_project_full.sh` (coming soon).
 
 
 # Design
+
 Why bash scripts? We thought it is most instructive to run commands in an interactive way by pasting individual `gcloud` commands.
 
 Ansible was considered, but it doesn't have support for many of the project/organization commands so it would be a lot of shell commands.
 
-We hope to add Terraform modules and an Ansible playbook for running the tests some time.  Contributions welcome!
+We hope to add Terraform modules, Deployment Manager templates and an Ansible playbooks for running the tests in time.  Contributions welcome!
 
+## Terraform
+
+# https://www.terraform.io/docs/providers/google/r/dns_managed_zone.html
+# roles/dns.admin
 

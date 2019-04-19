@@ -33,6 +33,12 @@ function set_var(){
     fi
 }
 
+# Allow caller of script to pass in over-riding PROJECT_NAME
+if [ x$1 == x ]; then
+    PROJECT_NAME=$1
+    set_var PROJECT_NAME $PROJECT_NAME
+fi
+
 source .env
 
 echo "get organization"
@@ -131,37 +137,56 @@ if [ x${bq_tables}x == xx ]; then
     echo "Using BigQuery dataset $bq_tables for logging sink"
 else
     echo "Create a bigquery table for Stackdriver Logging for all projects in shared"
-    bq --location=$REGION mk --dataset --default_table_expiration [INTEGER] --default_partition_expiration [INTEGER2] --description [DESCRIPTION] [PROJECT_ID]:[DATASET]
+    bq --location=$REGION mk \
+       --dataset \
+       --default_table_expiration [INTEGER] \
+       --default_partition_expiration [INTEGER2] \
+       --description [DESCRIPTION] $SHARED_PROJECT_ID:[DATASET]
 fi
 
 stackdriver_bucket=`gsutil ls -p $SHARED_PROJECT_ID -l $REGION | grep $STACKDRIVER_BUCKET || echo ""`
 if [ x${stackdriver_bucket}x == xx ]; then
     echo "Create a Storage Bucket for Stackdriver Logging for all projects in shared"    
-    gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$STACKDRIVER_BUCKET
+    gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$GLOBAL_STACKDRIVER_LOGS_BUCKET
 fi
 
-echo "For each tenant project, we will create a bucket for logging and a bucket for data in the shared project"
-echo "We will create a Cloud Function to handle authorizing a new tenant to its buckets in the shared project"
+echo "For each tenant project, we will create a bucket for data and grant permissions to logging in the shared project"
+echo "Soon we will create a Cloud Function to handle authorizing a new tenant to its buckets in the shared project"
 
-gcloud services enable vpcaccess.googleapis.com --project $SHARED_PROJECT_ID
+# gcloud services enable vpcaccess.googleapis.com --project $SHARED_PROJECT_ID
 
-gcloud beta compute networks vpc-access connectors create $SHARED_FUNCTION_CONNECTOR_NAME \
---network $SHARED_VPC_NAME \
---region $REGION \
---range 10.8.0.0/28
+# gcloud beta compute networks vpc-access connectors create $SHARED_FUNCTION_CONNECTOR_NAME \
+# --network $SHARED_VPC_NAME \
+# --region $REGION \
+# --range 10.8.0.0/28
+
+# These commands must run on the host with private access to Storage API.
+gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT 
+gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com:roles/storage.objectCreator gs://$TENANT_BUCKET_IN_SHARED_PROJECT
+gcloud iam service-accounts create ${BUCKET_PERMISSIONS_FUNCTION_SA}
+gcloud projects add-iam-policy-binding $SHARED_PROJECT_ID --member "serviceAccount:${BUCKET_PERMISSIONS_FUNCTION_SA}@${SHARED_PROJECT_ID}.iam.gserviceaccount.com" --role "roles/storage.admin"
+
+gcloud app create --project $SHARED_PROJECT_ID
+gcloud access-context-manager levels create AllowAppEngine --title "allowAppEngine"  --basic-level-spec conditions.yaml    --policy=$POLICY_ID --project shared-gcp-services
+
+# https://cloud.google.com/functions/docs/connecting-vpc
+# gcloud beta functions deploy FUNCTION_NAME \
+# --vpc-connector projects/PROJECT_ID/locations/REGION/connectors/CONNECTOR_NAME \
+# FLAGS...
 
 function enable_full_logging() {
   PROJECT_ID = $1
 
-read -r -d '' LOGGING_BLOCK <<-'EOF'
-auditConfigs:
- - service: allServices
-   auditLogConfigs:
-    - logType: ADMIN_READ
-    - logType: DATA_READ
-    - logType: DATA_WRITE
+read -r -d '' LOGGING_BLOCK <<- 'EOF'
+auditConfigs:\n
+ - service: allServices\n
+   auditLogConfigs:\n
+    - logType: ADMIN_READ\n
+    - logType: DATA_READ\n
+    - logType: DATA_WRITE\n
 EOF
- echo "${LOGGING_BLOCK}" >> /tmp/iam-policy.json
+ echo -e "${LOGGING_BLOCK}" >> /tmp/iam-policy.json
+ gcloud projects set-iam-policy $PROJECT_ID /tmp/iam-policy.json
 
 }
 
@@ -169,6 +194,14 @@ EOF
 # All variables should be set now.
 # Non idempotent from here. Have to comment out on restart.
 ###########################################################
+function make_startup_script() {
+cat <<EOF > /tmp/startup-script.sh
+curl -sSO https://dl.google.com/cloudagents/install-logging-agent.sh
+chmod a+x install-logging-agent.sh
+sudo ./install-logging-agent.sh
+EOF
+
+}
 
 function configure_project() {
   PROJECT_ID=$1
@@ -192,7 +225,8 @@ function configure_project() {
   #   --member="serviceAccount:${SERVICE_ACCOUNT}@${PROJECT_NUMBER}.iam.gserviceaccount.com" \
   #   --role="roles/accesscontextmanager.policyAdmin"
 
-     
+  echo "enable complete logging"
+  enable_full_logging $PROJECT_ID
 
   echo "create $PROJECT_ID bucket now because you cannot after service perimeter is up"
   gsutil mb -p $PROJECT_ID -l $REGION gs://$BUCKET
@@ -217,28 +251,28 @@ function configure_project() {
   gcloud compute networks create ${VPC_NAME} --description=SERVICE_CONTROL_VPC --project $PROJECT_ID
   
   gcloud beta compute firewall-rules create deny-all \
-  --project=$PROJECT_ID \
-  --network $VPC_NAME \
-  --direction ingress \
-  --action deny \
-  --rules all \
-  --enable-logging 
+   --project=$PROJECT_ID \
+   --network $VPC_NAME \
+   --direction ingress \
+   --action deny \
+   --rules all \
+   --enable-logging 
   
   gcloud beta compute firewall-rules create allow-whitelist --network $VPC_NAME \
-  --project=$PROJECT_ID \
-  --direction ingress \
-  --action allow \
-  --rules tcp:443,icmp,tcp:22 \
-  --source-ranges $SOURCE_RANGES_IP_WHITELIST \
-  --target-tags bastion \
-  --enable-logging 
+   --project=$PROJECT_ID \
+   --direction ingress \
+   --action allow \
+   --rules tcp:443,icmp,tcp:22 \
+   --source-ranges $SOURCE_RANGES_IP_WHITELIST \
+   --target-tags bastion \
+   --enable-logging 
 
   gcloud beta dns managed-zones create $ZONE_NAME \
-    --visibility=private \
-    --networks=https://www.googleapis.com/compute/v1/projects/$PROJECT_ID/global/networks/$VPC_NAME \
-    --description="${ZONE_DESCRIPTION}" \
-    --dns-name=googleapis.com \
-    --project $PROJECT_ID
+   --visibility=private \
+   --networks=https://www.googleapis.com/compute/v1/projects/$PROJECT_ID/global/networks/$VPC_NAME \
+   --description="${ZONE_DESCRIPTION}" \
+   --dns-name=googleapis.com \
+   --project $PROJECT_ID
   
   gcloud dns record-sets transaction start --zone=$ZONE_NAME --project=$PROJECT_ID
   gcloud dns record-sets transaction add --name=*.googleapis.com. \
@@ -247,19 +281,61 @@ function configure_project() {
    --ttl=300 --project=$PROJECT_ID
   gcloud dns record-sets transaction execute --zone=$ZONE_NAME --project=$PROJECT_ID
 
-  echo "create bastion host for tenant"
+  make_startup_script
+
+  echo "create bastion host for project"
   echo "default scopes are storage.readonly. must over-ride them."
   gcloud compute instances create bastion-$PROJECT_ID \
-  --project $PROJECT_ID \
-  --machine-type f1-micro \
-  --boot-disk-auto-delete \
-  --boot-disk-size 10GB \
-  --network $VPC_NAME \
-  --image-family debian-9 \
-  --image-project debian-cloud \
-  --tags bastion \
-  --zone $ZONE \
-  --scopes $SCOPES 
+   --project $PROJECT_ID \
+   --machine-type f1-micro \
+   --boot-disk-auto-delete \
+   --boot-disk-size 10GB \
+   --network $VPC_NAME \
+   --image-family debian-9 \
+   --image-project debian-cloud \
+   --tags bastion \
+   --zone $ZONE \
+   --scopes $SCOPES \
+   --metadata-from-file startup-script=/tmp/startup-script.sh
+
+  gcloud beta container clusters create "cluster0" \
+    --zone "$ZONE_NAME" \
+    --no-enable-basic-auth \
+    --cluster-version "1.11.8-gke.6" \
+    --machine-type "n1-standard-1" \
+    --image-type "COS" \
+    --disk-type "pd-standard" \
+    --disk-size "100" \
+    --scopes "https://www.googleapis.com/auth/compute","https://www.googleapis.com/auth/devstorage.full_contro","https://www.googleapis.com/auth/logging.write","https://www.googleapis.com/auth/monitoring","https://www.googleapis.com/auth/servicecontrol","https://www.googleapis.com/auth/service.management.readonly","https://www.googleapis.com/auth/trace.append" \
+    --preemptible \
+    --num-nodes "1" \
+    --enable-cloud-logging \
+    --enable-cloud-monitoring \
+    --no-enable-ip-alias \
+    --network "${VPC_NAME}" \
+    --create-subnetwork kubesubnet \
+    --enable-autoscaling \
+    --min-nodes "1" \
+    --max-nodes "3" \
+    --addons HorizontalPodAutoscaling,HttpLoadBalancing,KubernetesDashboard \
+    --enable-autoupgrade \
+    --enable-autorepair \
+    --enable-master-authorized-networks \
+    --master-authorized-networks $SOURCE_RANGES_IP_WHITELIST \
+    --enable-ip-alias \
+    --enable-private-nodes \
+    --master-ipv4-cidr 172.16.0.0/28 
+  
+  if [ ${PROJECT_NUMBER} != ${SHARED_PROJECT_NUMBER} ]; then
+      echo "create bridge resources"
+      echo "bridge name cannot start with numbers."
+      gcloud access-context-manager perimeters create bridge \
+       --title="${PROJECT_ID}PerimeterBridge" \
+       --perimeter-type=bridge \
+       --resources=projects/${PROJECT_NUMBER},projects/${SHARED_PROJECT_NUMBER} \
+       --policy=${POLICY_ID} \
+       --project=${PROJECT_ID}
+  fi
 
 }
 
@@ -276,68 +352,6 @@ echo >&2 '
 '
 
 
-
-
-
-# echo "CREATE THE SHARED PROJECT"
-# echo "note that sec_level is high because shared resources have a higher attack value"
-# gcloud projects create $SHARED_PROJECT_ID --folder $FOLDER_ID --labels $SHARED_PROJECT_LABELS
-# gcloud alpha billing projects link $SHARED_PROJECT_ID --billing-account $BILLING_ACCOUNT
-# gsutil mb -p $SHARED_PROJECT_ID  gs://test-shared-bucket-created-by-bastion 
-# gcloud compute networks create ${VPC_NAME} --description=TENANT_PROJECT_VPC --project $PROJECT_ID
-
-
-# gcloud access-context-manager perimeters   create ${SHARED_PROJECT_PERIMETER} --policy=${POLICY_ID} --title=$SHARED_POLICY_TITLE   --resources=projects/${SHARED_PROJECT_NUMBER}   --restricted-services=$SERVICES --project=${SHARED_PROJECT_ID}
-
-# echo "create bridge resources"
-# echo "bridge name cannot start with numbers. try with numerical prefix"
-# gcloud access-context-manager perimeters create bridge   --title="${PROJECT_ID}PerimeterBridge" --perimeter-type=bridge   --resources=projects/${PROJECT_NUMBER},projects/${SHARED_PROJECT_NUMBER} --policy=${POLICY_ID} --project=${PROJECT_ID}
-
-# gcloud projects add-iam-policy-binding  \
-# --member serviceAccount:service-568160633113@compute-system.iam.gserviceaccount.com \
-# --role roles/storage.admin $SHARED_PROJECT_ID
-
-# gcloud beta compute firewall-rules create deny-all \
-# --project=$SHARED_PROJECT_ID \
-# --network $SHARED_VPC_NAME \
-# --direction ingress \
-# --action deny \
-# --rules all \
-# --enable-logging 
-
-# gcloud beta compute firewall-rules create allow-whitelist --network $SHARED_VPC_NAME \
-# --project=$SHARED_PROJECT_ID \
-# --direction ingress \
-# --action allow \
-# --rules tcp:443,icmp,tcp:22 \
-# --source-ranges 35.196.215.192/32,35.188.30.0/32 \
-# --target-tags bastion \
-# --enable-logging 
-
-
-# gcloud compute networks create ${SHARED_VPC_NAME} --description=SHARED_PROJECT_VPC --project $SHARED_PROJECT_ID 
-
-# echo "create bastion host for shared project"
-# echo "default scopes are storage.readonly. must over-ride them."
-# gcloud compute instances create bastion-$PROJECT_ID \
-# --project $PROJECT_ID \
-# --machine-type f1-micro \
-# --boot-disk-auto-delete \
-# --boot-disk-size 10GB \
-# --network $VPC_NAME \
-# --image-family debian-9 \
-# --image-project debian-cloud \
-# --tags bastion \
-# --zone us-central1-a \
-# --scopes $SHARED_SCOPES
-# --service-account 
-
-
-
-# gcloud compute ssh --zone us-central1-a bastion-shared-gcp-services --project $SHARED_PROJECT_ID
-
-# gsutil mb -p shared-gcp-services -l us-central1 gs://test-shared-bucket-created-by-bastion-SHARED_RAND
-
 # Sec210 validator
 # Inventory
 # Access troubleshooter, IAM recommender
@@ -349,9 +363,6 @@ echo >&2 '
 
 # AI Platform Notebooks
 
-# gsutil iam ch [MEMBER_TYPE]:[MEMBER_NAME]:[ROLE] gs://[BUCKET_NAME]
 
-# https://www.terraform.io/docs/providers/google/r/dns_managed_zone.html
-# roles/dns.admin
 
 
