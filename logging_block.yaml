@@ -1,0 +1,6 @@
+auditConfigs:
+ - service: allServices
+   auditLogConfigs:
+    - logType: ADMIN_READ
+    - logType: DATA_READ
+    - logType: DATA_WRITE

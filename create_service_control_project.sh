@@ -37,6 +37,8 @@ function set_var(){
 if [ x$1 == x ]; then
     PROJECT_NAME=$1
     set_var PROJECT_NAME $PROJECT_NAME
+    set_var RAND ""
+    set_var SHARED_RAND ""
 fi
 
 source .env
@@ -109,14 +111,14 @@ fi
 # source again to get RAND and SHARED_RAND templating
 source .env
 
-if [ x${BILLING_ACCOUNT}x == xx]; then
+if [ x${BILLING_ACCOUNT}x == xx ]; then
     BILLING_ACCOUNT=`gcloud alpha billing accounts list | tail -n +2 | awk '{print $1}'`
     set_var BILLING_ACCOUNT $BILLING_ACCOUNT
 fi
 
 if [ x${PROJECT_NUMBER}x == xx ]; then
     echo "CREATE THE $PROJECT_NAME PROJECT under folder number $FOLDER_NUMBER"
-    projects_json=`gcloud projects create $PROJECT_NAME --folder $FOLDER_NUMBER --labels $PROJECT_LABELS --format json`
+    projects_json=`gcloud projects create $PROJECT_ID --folder $FOLDER_NUMBER --labels $PROJECT_LABELS --format json`
     PROJECT_NUMBER=`echo $projects_json | jq '.projectNunber' | sed 's/\"//g'`
     set_var PROJECT_NUMBER $PROJECT_NUMBER
     gcloud alpha billing projects link $PROJECT_ID --billing-account $BILLING_ACCOUNT
@@ -124,7 +126,7 @@ fi
 
 if [ x${SHARED_PROJECT_NUMBER}x == xx ]; then
     echo "CREATE THE $SHARED_PROJECT_NAME Shared Project under folder number $FOLDER_NUMBER"
-    projects_json=`gcloud projects create $SHARED_PROJECT_NAME --folder $FOLDER_NUMBER --labels $SHARED_PROJECT_LABELS --format json`
+    projects_json=`gcloud projects create $SHARED_PROJECT_ID --folder $FOLDER_NUMBER --labels $SHARED_PROJECT_LABELS --format json`
     SHARED_PROJECT_NUMBER=`echo $projects_json | jq '.projectNumber' | sed 's/\"//g'`
     if [ ${SHARED_PROJECT_NUMBER} != null ]; then
         set_var SHARED_PROJECT_NUMBER $SHARED_PROJECT_NUMBER
@@ -144,7 +146,7 @@ else
        --description [DESCRIPTION] $SHARED_PROJECT_ID:[DATASET]
 fi
 
-stackdriver_bucket=`gsutil ls -p $SHARED_PROJECT_ID -l $REGION | grep $STACKDRIVER_BUCKET || echo ""`
+stackdriver_bucket=`gsutil ls -p $SHARED_PROJECT_ID gs:// | grep $GLOBAL_STACKDRIVER_LOGS_BUCKET || echo ""`
 if [ x${stackdriver_bucket}x == xx ]; then
     echo "Create a Storage Bucket for Stackdriver Logging for all projects in shared"    
     gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$GLOBAL_STACKDRIVER_LOGS_BUCKET
@@ -153,40 +155,38 @@ fi
 echo "For each tenant project, we will create a bucket for data and grant permissions to logging in the shared project"
 echo "Soon we will create a Cloud Function to handle authorizing a new tenant to its buckets in the shared project"
 
+# Cloud Functions and AppEngine are currently not supported on projects with VPC Service Controls
+# However, these services running in other Projects can connect to a VPC Service Control Project
+# using the following:
 # gcloud services enable vpcaccess.googleapis.com --project $SHARED_PROJECT_ID
-
 # gcloud beta compute networks vpc-access connectors create $SHARED_FUNCTION_CONNECTOR_NAME \
 # --network $SHARED_VPC_NAME \
 # --region $REGION \
 # --range 10.8.0.0/28
 
 # These commands must run on the host with private access to Storage API.
+function set_bucket_permissions {
 gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT 
 gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com:roles/storage.objectCreator gs://$TENANT_BUCKET_IN_SHARED_PROJECT
-gcloud iam service-accounts create ${BUCKET_PERMISSIONS_FUNCTION_SA}
-gcloud projects add-iam-policy-binding $SHARED_PROJECT_ID --member "serviceAccount:${BUCKET_PERMISSIONS_FUNCTION_SA}@${SHARED_PROJECT_ID}.iam.gserviceaccount.com" --role "roles/storage.admin"
 
-gcloud app create --project $SHARED_PROJECT_ID
-gcloud access-context-manager levels create AllowAppEngine --title "allowAppEngine"  --basic-level-spec conditions.yaml    --policy=$POLICY_ID --project shared-gcp-services
-
-# https://cloud.google.com/functions/docs/connecting-vpc
-# gcloud beta functions deploy FUNCTION_NAME \
-# --vpc-connector projects/PROJECT_ID/locations/REGION/connectors/CONNECTOR_NAME \
-# FLAGS...
+}
 
 function enable_full_logging() {
-  PROJECT_ID = $1
+  PROJECT_ID=$1
 
-read -r -d '' LOGGING_BLOCK <<- 'EOF'
-auditConfigs:\n
- - service: allServices\n
-   auditLogConfigs:\n
-    - logType: ADMIN_READ\n
-    - logType: DATA_READ\n
-    - logType: DATA_WRITE\n
-EOF
- echo -e "${LOGGING_BLOCK}" >> /tmp/iam-policy.json
+#   read -r -d '' LOGGING_BLOCK <<- 'EOF'
+# auditConfigs:\n
+#  - service: allServices\n
+#    auditLogConfigs:\n
+#     - logType: ADMIN_READ\n
+#     - logType: DATA_READ\n
+#     - logType: DATA_WRITE\n
+# EOF
+#  echo -e "${LOGGING_BLOCK}" >> /tmp/iam-policy.json
+ gcloud projects get-iam-policy $PROJECT_ID > /tmp/iam-policy.json
+ cat logging_block.yaml >> /tmp/iam-policy.json
  gcloud projects set-iam-policy $PROJECT_ID /tmp/iam-policy.json
+ rm /tmp/iam-policy.json
 
 }
 
@@ -232,8 +232,10 @@ function configure_project() {
   gsutil mb -p $PROJECT_ID -l $REGION gs://$BUCKET
   
   echo "create a log sink to bigquery in shared project"
-  gcloud beta logging sinks create $BIGQUERY_SHARED_DATASET \
-      bigquery.googleapis.com/projects/my-project/datasets/$BIGQUERY_SHARED_DATASET
+  echo "replace this with aggregated folder logging"
+  gcloud beta logging sinks create $BIGQUERY_SHARED_DATASET --quiet \
+      bigquery.googleapis.com/projects/my-project/datasets/$BIGQUERY_SHARED_DATASET \
+      --project $PROJECT_ID
 
   echo "create a security perimeter for the tenant project"
   echo "GOTCHA - perimeter name cannot have a dash '-'"
@@ -298,24 +300,27 @@ function configure_project() {
    --scopes $SCOPES \
    --metadata-from-file startup-script=/tmp/startup-script.sh
 
+  echo "Creating private GKE cluster"
+  echo "Instructions to access cluster via cloud shell at https://cloud.google.com/kubernetes-engine/docs/how-to/private-clusters"
   gcloud beta container clusters create "cluster0" \
-    --zone "$ZONE_NAME" \
+    --zone "$ZONE" \
     --no-enable-basic-auth \
     --cluster-version "1.11.8-gke.6" \
     --machine-type "n1-standard-1" \
     --image-type "COS" \
     --disk-type "pd-standard" \
     --disk-size "100" \
-    --scopes "https://www.googleapis.com/auth/compute","https://www.googleapis.com/auth/devstorage.full_contro","https://www.googleapis.com/auth/logging.write","https://www.googleapis.com/auth/monitoring","https://www.googleapis.com/auth/servicecontrol","https://www.googleapis.com/auth/service.management.readonly","https://www.googleapis.com/auth/trace.append" \
+    --scopes "https://www.googleapis.com/auth/compute","https://www.googleapis.com/auth/devstorage.full_control","https://www.googleapis.com/auth/logging.write","https://www.googleapis.com/auth/monitoring","https://www.googleapis.com/auth/servicecontrol","https://www.googleapis.com/auth/service.management.readonly","https://www.googleapis.com/auth/trace.append" \
     --preemptible \
     --num-nodes "1" \
     --enable-cloud-logging \
     --enable-cloud-monitoring \
+    --enable-stackdriver-kubernetes \
     --no-enable-ip-alias \
-    --network "${VPC_NAME}" \
-    --create-subnetwork kubesubnet \
+    --network "projects/$PROJECT_ID/global/networks/${VPC_NAME}" \
+    --create-subnetwork name="kubesubnet" \
     --enable-autoscaling \
-    --min-nodes "1" \
+    --min-nodes "0" \
     --max-nodes "3" \
     --addons HorizontalPodAutoscaling,HttpLoadBalancing,KubernetesDashboard \
     --enable-autoupgrade \
@@ -324,8 +329,22 @@ function configure_project() {
     --master-authorized-networks $SOURCE_RANGES_IP_WHITELIST \
     --enable-ip-alias \
     --enable-private-nodes \
-    --master-ipv4-cidr 172.16.0.0/28 
-  
+    --master-ipv4-cidr 172.16.0.0/28 \
+    --metadata disable-legacy-endpoints=true \
+    --project $PROJECT_ID
+
+  gcloud compute routers create nat-router \
+    --network ${VPC_NAME} \
+    --region $REGION \
+    --project $PROJECT_ID
+
+  gcloud compute routers nats create nat-config \
+    --router-region us-central1 \
+    --router nat-router \
+    --nat-all-subnet-ip-ranges \
+    --auto-allocate-nat-external-ips \
+    --project $PROJECT_ID
+
   if [ ${PROJECT_NUMBER} != ${SHARED_PROJECT_NUMBER} ]; then
       echo "create bridge resources"
       echo "bridge name cannot start with numbers."
@@ -352,10 +371,25 @@ echo >&2 '
 '
 
 
-# Sec210 validator
-# Inventory
-# Access troubleshooter, IAM recommender
-# APN Partner early access
+# The following functions are not implemented fully. Stubs for later.
+function connect_app_engine() {
+  gcloud app create --project $SHARED_PROJECT_ID
+  gcloud access-context-manager levels create AllowAppEngine \
+   --title "allowAppEngine"  \
+   --basic-level-spec conditions.yaml \
+   --policy=$POLICY_ID \
+   --project $SHARED_PROJECT_ID
+}
+
+function connect_cloud_function() {
+  gcloud iam service-accounts create ${BUCKET_PERMISSIONS_FUNCTION_SA}
+  gcloud projects add-iam-policy-binding $SHARED_PROJECT_ID \
+   --member "serviceAccount:${BUCKET_PERMISSIONS_FUNCTION_SA}@${SHARED_PROJECT_ID}.iam.gserviceaccount.com" \
+   --role "roles/storage.admin"
+  # https://cloud.google.com/functions/docs/connecting-vpc
+  gcloud beta functions deploy FUNCTION_NAME \
+   --vpc-connector projects/$PROJECT_ID/locations/REGION/connectors/$CONNECTOR_NAME 
+}
 
 # Bit.ly/notebooks-best-practices
 # Bit.ly/notebooks-ci
@@ -363,6 +397,7 @@ echo >&2 '
 
 # AI Platform Notebooks
 
+# Support GitLab https://medium.com/@bamnet/cloud-source-repositories-gitlab-2fdcf1a8e50c
 
 
 
