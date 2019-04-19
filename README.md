@@ -1,4 +1,12 @@
-# VPC Service Controls demo scripts
+# Gcloud Lockdown Demo Script
+
+This repo demonstrates many best practices of a secure deployment on GCP including:
+* VPC Service Controls
+* Private GKE with concealed metadata service
+* Automated per-tenant GCP Project creation connected to a shared services GCP Project
+  to ensure a hard security boundary for multi-tenancy
+* Complete Stackdriver Logging of all DATA_READ, DATA_WRITE and ADMIN_READ activities
+* Tests of malicious activity and detection capability
 
 VPC Service Controls are an excellent tool to prevent data exfiltration and other attack chains.
 This repo supports the blog describing this at ___.
