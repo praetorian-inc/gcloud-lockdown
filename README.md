@@ -17,6 +17,8 @@ In order for cloud resources like VMs or Functions to access GCP Storage (other 
 must whitelist GCPs public dns names for the given services. This means an attacker can create a GCP Storage Bucket and exfiltrate to their own Bucket.
 VPC Service Controls solve exactly this problem.
 
+For a detailed presentation by the project manager see the [2019 Google Next video](https://youtu.be/rGCU6Ajo0QE).
+
 ## Requirements
 
 The role running the scripts must have the following permissions:
