@@ -5,7 +5,8 @@ This repo demonstrates many best practices of a secure deployment on GCP includi
 * Private GKE with concealed metadata service
 * Automated per-tenant GCP Project creation connected to a shared services GCP Project
   to ensure a hard security boundary for multi-tenancy
-* Complete Stackdriver Logging of all DATA_READ, DATA_WRITE and ADMIN_READ activities
+* Complete Stackdriver Logging of all DATA_READ, DATA_WRITE and ADMIN_READ GCP Services activities
+* Stackdriver Logging agent installed to bastion and GKE logging enabled
 * Tests of malicious activity and detection capability
 
 VPC Service Controls are an excellent tool to prevent data exfiltration and other attack chains.
@@ -45,6 +46,14 @@ cp .env-sample .env
 ./create_service_control_project.sh
 ```
 
+If adding variables to .env files for contributing upstream, it is recommended that you add them to .env-sample
+and then copy any data you want preserved (maybe just SOURCE_RANGES_IP_WHITELIST and FOLDER_RAND) from .env
+and paste back into .env after clobbering.
+
+```
+> cp .env-sample .env
+> <paste back your variables to .env>
+```
 
 ## Troubleshooting
 
@@ -60,9 +69,9 @@ source .env
 ## Design
 
 Why bash scripts? We thought it is most instructive to run commands in an interactive way by pasting individual `gcloud` commands.
-
 Ansible was considered, but it doesn't have support for many of the project/organization commands so it would be a lot of shell commands.
-
+Terraform is great for immutable infrastructure where all assets are controlled by Terraform, but it does not play well with mutations
+or mixed managed/unmanaged resources.  Further, gcloud and Ansible lend themselves nicely to stepping through commands one at a time.
 We hope to add Terraform modules, Deployment Manager templates and an Ansible playbooks for running the tests in time.  Contributions welcome!
 
 ### Terraform

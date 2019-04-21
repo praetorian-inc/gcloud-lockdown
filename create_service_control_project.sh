@@ -35,10 +35,9 @@ function set_var(){
 
 # Allow caller of script to pass in over-riding PROJECT_NAME
 if [ x$1 == x ]; then
-    PROJECT_NAME=$1
-    set_var PROJECT_NAME $PROJECT_NAME
+    ARG_PROJECT_NAME=$1
+    set_var PROJECT_NAME $ARG_PROJECT_NAME
     set_var RAND ""
-    set_var SHARED_RAND ""
 fi
 
 source .env
@@ -92,6 +91,19 @@ else
 fi
 set_var POLICY_ID $POLICY_ID
 
+########################################
+# SET RANDOM SUFFIXES IF NEEDED
+########################################
+
+if [ x${SHARED_FREE_RAND}x == xx ]; then 
+
+    echo "No SHARED_FREE_RAND variable found, creating random shared project suffix"
+    SHARED_FREE_RAND=${RANDOM}
+    set_var SHARED_FREE_RAND $SHARED_FREE_RAND
+else
+    echo "Using random suffix $SHARED_FREE_RAND"
+fi
+
 if [ x${SHARED_RAND}x == xx ]; then 
     echo "No SHARED_RAND variable found, creating random shared project suffix"
     SHARED_RAND=${RANDOM}
@@ -116,13 +128,24 @@ if [ x${BILLING_ACCOUNT}x == xx ]; then
     set_var BILLING_ACCOUNT $BILLING_ACCOUNT
 fi
 
+########################################
+# TENANT PROJECT 
+########################################
+
 if [ x${PROJECT_NUMBER}x == xx ]; then
     echo "CREATE THE $PROJECT_NAME PROJECT under folder number $FOLDER_NUMBER"
     projects_json=`gcloud projects create $PROJECT_ID --folder $FOLDER_NUMBER --labels $PROJECT_LABELS --format json`
-    PROJECT_NUMBER=`echo $projects_json | jq '.projectNunber' | sed 's/\"//g'`
+    PROJECT_NUMBER=`echo $projects_json | jq '.projectNumber' | sed 's/\"//g'`
     set_var PROJECT_NUMBER $PROJECT_NUMBER
     gcloud alpha billing projects link $PROJECT_ID --billing-account $BILLING_ACCOUNT
 fi
+
+########################################
+
+
+########################################
+# SHARED PROJECT 
+########################################
 
 if [ x${SHARED_PROJECT_NUMBER}x == xx ]; then
     echo "CREATE THE $SHARED_PROJECT_NAME Shared Project under folder number $FOLDER_NUMBER"
@@ -165,6 +188,31 @@ echo "Soon we will create a Cloud Function to handle authorizing a new tenant to
 # --range 10.8.0.0/28
 
 # These commands must run on the host with private access to Storage API.
+########################################
+
+
+########################################
+# Non VPC Controls Shared Project
+########################################
+
+if [ x${SHARED_FREE_PROJECT_NUMBER}x == xx ]; then
+    echo "CREATE THE $SHARED_FREE_PROJECT_NAME Shared Project under folder number $FOLDER_NUMBER"
+    projects_json=`gcloud projects create $SHARED_FREE_PROJECT_ID --folder $FOLDER_NUMBER --labels $SHARED_FREE_PROJECT_LABELS --format json`
+    SHARED_FREE_PROJECT_NUMBER=`echo $projects_json | jq '.projectNumber' | sed 's/\"//g'`
+    if [ ${SHARED_FREE_PROJECT_NUMBER} != null ]; then
+        set_var SHARED_FREE_PROJECT_NUMBER $SHARED_FREE_PROJECT_NUMBER
+    fi
+    gcloud alpha billing projects link $SHARED_FREE_PROJECT_ID --billing-account $BILLING_ACCOUNT
+fi
+
+
+########################################
+
+function remove_dashes {
+  STRING=$1
+  echo $STRING | sed 's/-//g' 
+}
+
 function set_bucket_permissions {
 gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT 
 gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com:roles/storage.objectCreator gs://$TENANT_BUCKET_IN_SHARED_PROJECT
@@ -174,6 +222,7 @@ gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com
 function enable_full_logging() {
   PROJECT_ID=$1
 
+# TODO replace this with FOLDER level logging with --inherit-children
 #   read -r -d '' LOGGING_BLOCK <<- 'EOF'
 # auditConfigs:\n
 #  - service: allServices\n
@@ -237,13 +286,17 @@ function configure_project() {
       bigquery.googleapis.com/projects/my-project/datasets/$BIGQUERY_SHARED_DATASET \
       --project $PROJECT_ID
 
-  echo "create a security perimeter for the tenant project"
+  echo "create a security perimeter for the TENANT or SHARED project, but not the SHARED_FREE"
   echo "GOTCHA - perimeter name cannot have a dash '-'"
-  gcloud access-context-manager perimeters create $PERIMETER_NAME \
-   --policy=${POLICY_ID} --title=$PERIMETER_TITLE \
-   --resources=projects/${PROJECT_NUMBER}   --restricted-services=$SERVICES \
-   --project=${PROJECT_ID}
-  
+  if [ $PROJECT_ID != $SHARED_FREE_PROJECT_ID ]; then
+    gcloud access-context-manager perimeters create $PERIMETER_NAME \
+     --policy=${POLICY_ID} --title=$PERIMETER_TITLE \
+     --resources=projects/${PROJECT_NUMBER}   --restricted-services=$SERVICES \
+     --project=${PROJECT_ID}
+  else
+    echo "Skipping service perimeter creation for SHARED_FREE project"
+  fi
+
   echo "get the compute service account created for the project"
   COMPUTE_SERVICE_ACCOUNT=`gcloud projects get-iam-policy $PROJECT_ID | grep 'developer.gserviceaccount.com' | cut -d':' -f2`
   # gcloud projects add-iam-policy-binding  \
@@ -345,10 +398,10 @@ function configure_project() {
     --auto-allocate-nat-external-ips \
     --project $PROJECT_ID
 
-  if [ ${PROJECT_NUMBER} != ${SHARED_PROJECT_NUMBER} ]; then
+  if [ ${PROJECT_NUMBER} == ${TENANT_PROJECT_NUMBER} ]; then
       echo "create bridge resources"
       echo "bridge name cannot start with numbers."
-      gcloud access-context-manager perimeters create bridge \
+      gcloud access-context-manager perimeters create bridge${PERIMETER_NAME} \
        --title="${PROJECT_ID}PerimeterBridge" \
        --perimeter-type=bridge \
        --resources=projects/${PROJECT_NUMBER},projects/${SHARED_PROJECT_NUMBER} \
@@ -358,9 +411,22 @@ function configure_project() {
 
 }
 
-configure_project $SHARED_PROJECT_ID $SHARED_PROJECT_NUMBER $SHARED_VPC_NAME \
-  $SHARED_ZONE_NAME $SHARED_BUCKET $SHARED_PERIMETER_NAME $SHARED_PERIMETER_TITLE \
-  $SHARED_SOURCE_RANGES_IP_WHITELIST
+if [ x${ARG_PROJECT_NAME}x != xx ]; then
+  configure_project $SHARED_PROJECT_ID $SHARED_PROJECT_NUMBER $SHARED_VPC_NAME \
+    $SHARED_ZONE_NAME $SHARED_BUCKET $SHARED_PERIMETER_NAME $SHARED_PERIMETER_TITLE \
+    $SHARED_SOURCE_RANGES_IP_WHITELIST
+fi
+
+if [ x${ARG_PROJECT_NAME}x != xx ]; then
+  configure_project $SHARED_FREE_PROJECT_ID $SHARED_FREE_PROJECT_NUMBER $SHARED_FREE_VPC_NAME \
+    $SHARED_FREE_ZONE_NAME $SHARED_FREE_BUCKET $SHARED_FREE_PERIMETER_NAME $SHARED_FREE_PERIMETER_TITLE \
+    $SHARED_FREE_SOURCE_RANGES_IP_WHITELIST
+fi
+
+TENANT_PROJECT_ID=$PROJECT_ID
+configure_project $PROJECT_ID $PROJECT_NUMBER $VPC_NAME \
+  $ZONE_NAME $BUCKET $PERIMETER_NAME $PERIMETER_TITLE \
+  $SOURCE_RANGES_IP_WHITELIST
 
 trap : 0
 
@@ -372,6 +438,7 @@ echo >&2 '
 
 
 # The following functions are not implemented fully. Stubs for later.
+# These services are not yet supported by VPC Service Controls and belong in the SHARED_FREE Project. 
 function connect_app_engine() {
   gcloud app create --project $SHARED_PROJECT_ID
   gcloud access-context-manager levels create AllowAppEngine \
@@ -391,6 +458,9 @@ function connect_cloud_function() {
    --vpc-connector projects/$PROJECT_ID/locations/REGION/connectors/$CONNECTOR_NAME 
 }
 
+# TODO for education purposes, put these into jupyter notebook blocks so users can step
+# through one by one.
+
 # Bit.ly/notebooks-best-practices
 # Bit.ly/notebooks-ci
 # Bit.ly/nova-extension
@@ -398,6 +468,5 @@ function connect_cloud_function() {
 # AI Platform Notebooks
 
 # Support GitLab https://medium.com/@bamnet/cloud-source-repositories-gitlab-2fdcf1a8e50c
-
 
 
