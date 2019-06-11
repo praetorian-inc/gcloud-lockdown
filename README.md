@@ -9,10 +9,12 @@ This repo demonstrates many best practices of a secure deployment on GCP includi
 * Stackdriver Logging agent installed to bastion and GKE logging enabled
 * Tests of malicious activity and detection capability
 
-VPC Service Controls are an excellent tool to prevent data exfiltration and other attack chains.
+VPC Service Controls allow users to define a security perimeter around Google Cloud Platform resources such 
+as Cloud Storage buckets, Bigtable instances, and BigQuery datasets to constrain data within a VPC and 
+help mitigate data exfiltration risks.
 This repo supports the blog describing this at ___.
 
-In a nutshell, data exfiltration is easy via GCP Storage Buckets despite best parctices to lock down networking with aggressive network egress policy. 
+In a nutshell, data exfiltration is easy via GCP Storage Buckets despite best practices to lock down networking with aggressive network egress policy. 
 In order for cloud resources like VMs or Functions to access GCP Storage (other services like Cloud SQL or BigQuery also apply) the network proxy
 must whitelist GCPs public dns names for the given services. This means an attacker can create a GCP Storage Bucket and exfiltrate to their own Bucket.
 VPC Service Controls solve exactly this problem.
@@ -86,3 +88,6 @@ https://docs.ansible.com/ansible/latest/modules/list_of_cloud_modules.html
 
 ### Deployment Manager
 https://cloud.google.com/deployment-manager/docs/best-practices/
+
+#### Todo
+https://github.com/jamesward/cloud-run-button

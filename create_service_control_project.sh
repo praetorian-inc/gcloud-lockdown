@@ -33,6 +33,12 @@ function set_var(){
     fi
 }
 
+JQ_PATH=`which jq || ""`
+if [[ x${JQ_PATH}x == xx ]]; then
+ echo "please install jq.  Aborting"
+ abort
+fi
+
 # Allow caller of script to pass in over-riding PROJECT_NAME
 if [ x$1 == x ]; then
     ARG_PROJECT_NAME=$1
@@ -80,7 +86,7 @@ else
     echo "Using random suffix $RAND"
 fi
 
-POLICY_ID=`gcloud access-context-manager policies list --organization $ORGANIZATION_ID --project vpc-service-control | tail -n +2 | awk '{print $1}' || echo ""`
+POLICY_ID=`gcloud access-context-manager policies list --organization $ORGANIZATION_ID  | tail -n +2 | awk '{print $1}' || echo ""`
 if [ x${POLICY_ID}x == xx ]; then
     echo "create an organization policy as a container for the service perimeter"
     echo "It seems that we can only create one policy per organization"
@@ -125,6 +131,9 @@ source .env
 
 if [ x${BILLING_ACCOUNT}x == xx ]; then
     BILLING_ACCOUNT=`gcloud alpha billing accounts list | tail -n +2 | awk '{print $1}'`
+    if [ x${BILLING_ACCOUNT}x == x[]x ]; then
+      echo "You must set BILLING_ACCOUNT in your .env file"
+    fi
     set_var BILLING_ACCOUNT $BILLING_ACCOUNT
 fi
 
@@ -213,10 +222,14 @@ function remove_dashes {
   echo $STRING | sed 's/-//g' 
 }
 
-function set_bucket_permissions {
-gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT 
-gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com:roles/storage.objectCreator gs://$TENANT_BUCKET_IN_SHARED_PROJECT
-
+# not used yet
+function set_tenant_in_shared_bucket_permissions {
+  TENANT_BUCKET_SHARED=`gsutil ls -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT`
+  if [ x${TENANT_BUCKET_SHARED}x == 'xx' ]; then
+    gsutil mb -p $SHARED_PROJECT_ID -l $REGION gs://$TENANT_BUCKET_IN_SHARED_PROJECT 
+    gsutil iam ch serviceAccount:1061633337459-compute@developer.gserviceaccount.com:roles/storage.objectCreator \
+              gs://$TENANT_BUCKET_IN_SHARED_PROJECT
+  fi
 }
 
 function enable_full_logging() {
@@ -277,14 +290,20 @@ function configure_project() {
   echo "enable complete logging"
   enable_full_logging $PROJECT_ID
 
-  echo "create $PROJECT_ID bucket now because you cannot after service perimeter is up"
-  gsutil mb -p $PROJECT_ID -l $REGION gs://$BUCKET
-  
-  echo "create a log sink to bigquery in shared project"
-  echo "replace this with aggregated folder logging"
-  gcloud beta logging sinks create $BIGQUERY_SHARED_DATASET --quiet \
+  TENANT_BUCKET=`gsutil ls -p $PROJECT_ID -l $REGION gs://$BUCKET`
+  if [ x${TENANT_BUCKET}x == 'xx' ]; then
+    echo "create $PROJECT_ID bucket now because you cannot after service perimeter is up"
+    gsutil mb -p $PROJECT_ID -l $REGION gs://$BUCKET
+  fi
+
+  LOGGING_SINK=`cloud beta logging sinks list --project $PROJECT_ID | grep $BIGQUERY_SHARED_DATASET`
+  if [ x${LOGGING_SINK}x != 'xx' ]; then
+    echo "create a log sink to bigquery in shared project"
+    echo "TODO replace this with aggregated folder logging"
+    gcloud beta logging sinks create $BIGQUERY_SHARED_DATASET --quiet \
       bigquery.googleapis.com/projects/my-project/datasets/$BIGQUERY_SHARED_DATASET \
       --project $PROJECT_ID
+  fi
 
   echo "create a security perimeter for the TENANT or SHARED project, but not the SHARED_FREE"
   echo "GOTCHA - perimeter name cannot have a dash '-'"
@@ -349,6 +368,7 @@ function configure_project() {
    --image-family debian-9 \
    --image-project debian-cloud \
    --tags bastion \
+   --can-ip-forward \
    --zone $ZONE \
    --scopes $SCOPES \
    --metadata-from-file startup-script=/tmp/startup-script.sh
@@ -365,11 +385,11 @@ function configure_project() {
     --disk-size "100" \
     --scopes "https://www.googleapis.com/auth/compute","https://www.googleapis.com/auth/devstorage.full_control","https://www.googleapis.com/auth/logging.write","https://www.googleapis.com/auth/monitoring","https://www.googleapis.com/auth/servicecontrol","https://www.googleapis.com/auth/service.management.readonly","https://www.googleapis.com/auth/trace.append" \
     --preemptible \
-    --num-nodes "1" \
+    --num-nodes "0" \
     --enable-cloud-logging \
     --enable-cloud-monitoring \
     --enable-stackdriver-kubernetes \
-    --no-enable-ip-alias \
+    --enable-ip-alias \
     --network "projects/$PROJECT_ID/global/networks/${VPC_NAME}" \
     --create-subnetwork name="kubesubnet" \
     --enable-autoscaling \
@@ -380,7 +400,6 @@ function configure_project() {
     --enable-autorepair \
     --enable-master-authorized-networks \
     --master-authorized-networks $SOURCE_RANGES_IP_WHITELIST \
-    --enable-ip-alias \
     --enable-private-nodes \
     --master-ipv4-cidr 172.16.0.0/28 \
     --metadata disable-legacy-endpoints=true \
@@ -468,5 +487,8 @@ function connect_cloud_function() {
 # AI Platform Notebooks
 
 # Support GitLab https://medium.com/@bamnet/cloud-source-repositories-gitlab-2fdcf1a8e50c
+
+# Creating minimal user permissions to run this script
+# gcloud organizations add-iam-policy-binding $ORGANIZATION_ID   --member="user:tanner.harper@kestenbroughton.net"   --role="roles/accesscontextmanager.policyReader"
 
 
